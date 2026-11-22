@@ -44,6 +44,12 @@ namespace MatrixRain
         [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr dc);
         [DllImport("gdi32.dll")] public static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, int rop);
         [DllImport("gdi32.dll")] public static extern bool PatBlt(IntPtr dc, int x, int y, int w, int h, int rop);
+        [DllImport("gdi32.dll")] public static extern int ExcludeClipRect(IntPtr dc, int l, int t, int r, int b);
+        [DllImport("gdi32.dll")] public static extern int SelectClipRgn(IntPtr dc, IntPtr rgn);
+        [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
+        [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr hwnd, int id, uint mods, uint vk);
+        [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr hwnd, int id);
 
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT { public int Left, Top, Right, Bottom; }
@@ -137,7 +143,12 @@ namespace MatrixRain
         int maxDelay;
 
         static float SpeedFactorFor(int speedSetting) { return 0.35f + speedSetting * 0.16f; } // 0.51 .. 1.95
-        static int MaxDelayFor(int densitySetting) { return 8 + (10 - densitySetting) * 14; }   // frames
+        // Density 1..10 = 0.1..1.0 = share of columns that rain (and shorter gaps between drops).
+        static float DensityFor(int densitySetting) { return Settings.Clamp(densitySetting, 1, 10) / 10f; }
+        static int MaxDelayFor(int densitySetting) { return 6 + (int)((1f - DensityFor(densitySetting)) * 90); } // frames
+
+        readonly float[] rank;   // fixed random 0..1 per column; the column rains while rank < density
+        float density;
 
         // Live changes while running (keyboard): rescale drops already falling so the change is instant.
         public void SetSpeed(int speedSetting)
@@ -150,9 +161,26 @@ namespace MatrixRain
 
         public void SetDensity(int densitySetting)
         {
+            float old = density;
+            density = DensityFor(densitySetting);
             maxDelay = MaxDelayFor(densitySetting);
             for (int c = 0; c < cols; c++)
+            {
                 if (delay[c] > maxDelay) delay[c] = rnd.Next(maxDelay + 1);
+                // Columns that just switched off are cleared at once, so less rain shows immediately.
+                if (rank[c] < old && rank[c] >= density)
+                {
+                    for (int r = 0; r < rows; r++) DrawCell(c, r, -1);
+                    NewDrop(c);
+                    continue;
+                }
+                // Columns that just switched on start almost right away.
+                if (rank[c] >= old && rank[c] < density && drawnHead[c] < 0)
+                {
+                    delay[c] = rnd.Next(Math.Max(1, maxDelay / 3));
+                    if (head[c] < -3) { head[c] = -1 - rnd.Next(3); drawnHead[c] = (int)Math.Floor(head[c]); }
+                }
+            }
         }
 
         IntPtr backDC, backBmp, oldBack, atlasDC, atlasBmp, oldAtlas;
@@ -178,6 +206,9 @@ namespace MatrixRain
             rnd = new Random(seed);
             speedFactor = SpeedFactorFor(s.Speed);
             maxDelay = MaxDelayFor(s.Density);
+            density = DensityFor(s.Density);
+            rank = new float[cols];
+            for (int c = 0; c < cols; c++) rank[c] = (float)rnd.NextDouble();
 
             grid = new int[cols * rows];
             for (int i = 0; i < grid.Length; i++) grid[i] = rnd.Next(nGlyphs);
@@ -297,6 +328,8 @@ namespace MatrixRain
             for (int c = 0; c < cols; c++)
             {
                 if (delay[c] > 0) { delay[c]--; continue; }
+                // A column switched off by density finishes its current drop, then stays dark.
+                if (rank[c] >= density && drawnHead[c] < 0) continue;
                 head[c] += speed[c];
                 int hi = (int)Math.Floor(head[c]);
                 int old = drawnHead[c];
@@ -339,6 +372,11 @@ namespace MatrixRain
         public void BlitTo(IntPtr dc)
         {
             Native.BitBlt(dc, 0, 0, Width, Height, backDC, 0, 0, Native.SRCCOPY);
+        }
+
+        public void BlitRect(IntPtr dc, Rectangle r)
+        {
+            Native.BitBlt(dc, r.X, r.Y, r.Width, r.Height, backDC, r.X, r.Y, Native.SRCCOPY);
         }
 
         // Copy only the column strips that changed this frame (much cheaper than a full-screen copy).
@@ -443,8 +481,77 @@ namespace MatrixRain
             EnsureRenderer();
             renderer.Step();
             IntPtr dc = Native.GetDC(Handle);
-            renderer.BlitDirtyTo(dc);
+            if (ovDC != IntPtr.Zero)
+            {
+                if (unchecked(Environment.TickCount - ovUntil) >= 0)
+                {
+                    renderer.BlitDirtyTo(dc);
+                    renderer.BlitRect(dc, ovRect); // put the rain back where the indicator was
+                    FreeOverlay();
+                }
+                else
+                {
+                    // Keep rain updates out of the indicator box so it never flickers.
+                    Native.ExcludeClipRect(dc, ovRect.Left, ovRect.Top, ovRect.Right, ovRect.Bottom);
+                    renderer.BlitDirtyTo(dc);
+                    Native.SelectClipRgn(dc, IntPtr.Zero);
+                    Native.BitBlt(dc, ovRect.X, ovRect.Y, ovRect.Width, ovRect.Height, ovDC, 0, 0, Native.SRCCOPY);
+                }
+            }
+            else renderer.BlitDirtyTo(dc);
             Native.ReleaseDC(Handle, dc);
+        }
+
+        // ---- temporary on-screen indicator ("SPEED 7", "DENSITY 0.6")
+        IntPtr ovDC, ovBmp, ovOld;
+        Rectangle ovRect;
+        int ovUntil;
+
+        void FreeOverlay()
+        {
+            if (ovDC == IntPtr.Zero) return;
+            Native.SelectObject(ovDC, ovOld);
+            Native.DeleteObject(ovBmp);
+            Native.DeleteDC(ovDC);
+            ovDC = IntPtr.Zero;
+        }
+
+        public void ShowIndicator(string label, string value, int filled)
+        {
+            if (!IsHandleCreated || IsDisposed) return;
+            EnsureRenderer();
+            if (ovDC != IntPtr.Zero)
+            {
+                IntPtr wdc = Native.GetDC(Handle);
+                renderer.BlitRect(wdc, ovRect);
+                Native.ReleaseDC(Handle, wdc);
+                FreeOverlay();
+            }
+
+            string text = label + "  " + value + "   " + new string('█', filled) + new string('░', 10 - filled);
+            Color baseC = settings.BaseColor();
+            Color textC = Color.FromArgb(baseC.R + (255 - baseC.R) / 3, baseC.G + (255 - baseC.G) / 3, baseC.B + (255 - baseC.B) / 3);
+            int fontPx = Math.Max(14, CellHeight() * 3 / 2);
+            using (Font font = new Font("Consolas", fontPx, FontStyle.Bold, GraphicsUnit.Pixel))
+            {
+                TextFormatFlags flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+                Size ts = TextRenderer.MeasureText(text, font, Size.Empty, flags);
+                int padX = fontPx, padY = fontPx / 2;
+                int w = Math.Min(ClientSize.Width, ts.Width + padX * 2), h = ts.Height + padY * 2;
+                ovRect = new Rectangle((ClientSize.Width - w) / 2, ClientSize.Height * 3 / 4 - h / 2, w, h);
+                using (Bitmap bmp = new Bitmap(w, h, PixelFormat.Format24bppRgb))
+                using (Graphics g = Graphics.FromImage(bmp))
+                using (Pen pen = new Pen(baseC, Math.Max(2, fontPx / 10)))
+                {
+                    g.Clear(Color.Black);
+                    g.DrawRectangle(pen, pen.Width / 2, pen.Width / 2, w - pen.Width, h - pen.Width);
+                    TextRenderer.DrawText(g, text, font, new Point(padX, padY), textC, Color.Black, flags);
+                    ovBmp = bmp.GetHbitmap(Color.Black);
+                }
+            }
+            ovDC = Native.CreateCompatibleDC(IntPtr.Zero);
+            ovOld = Native.SelectObject(ovDC, ovBmp);
+            ovUntil = unchecked(Environment.TickCount + 1500);
         }
 
         public void ApplyLiveSettings()
@@ -459,12 +566,15 @@ namespace MatrixRain
             if (renderer == null) { e.Graphics.Clear(Color.Black); return; }
             IntPtr dc = e.Graphics.GetHdc();
             renderer.BlitTo(dc);
+            if (ovDC != IntPtr.Zero)
+                Native.BitBlt(dc, ovRect.X, ovRect.Y, ovRect.Width, ovRect.Height, ovDC, 0, 0, Native.SRCCOPY);
             e.Graphics.ReleaseHdc(dc);
         }
 
         protected override void Dispose(bool disposing)
         {
             if (renderer != null) { renderer.Dispose(); renderer = null; }
+            FreeOverlay();
             base.Dispose(disposing);
         }
     }
@@ -487,6 +597,8 @@ namespace MatrixRain
                     break;
                 case 0x0100:                              // WM_KEYDOWN
                     if (HandleControlKey((int)(m.WParam.ToInt64() & 0xFF))) return true;
+                    // Auto-repeat of a key that was already held when we started (e.g. Ctrl+M) doesn't exit.
+                    if ((m.LParam.ToInt64() & 0x40000000) != 0) return true;
                     Program.Quit();
                     return true;
                 case 0x0104:                              // WM_SYSKEYDOWN (Alt combos)
@@ -501,6 +613,8 @@ namespace MatrixRain
         static bool HandleControlKey(int vk)
         {
             Keys mods = Control.ModifierKeys;
+            if (vk == 0x11 || vk == 0xA2 || vk == 0xA3) return true;                     // Ctrl on its own
+            if (vk == 0x4D && (mods & Keys.Control) != 0) return true;                   // Ctrl+M (the start hotkey)
             if ((mods & (Keys.Control | Keys.Alt)) != 0) return false;
             if (vk == 0x10 || vk == 0x14 || vk == 0xA0 || vk == 0xA1) return true; // Shift, Caps Lock
             if (vk >= 0x30 && vk <= 0x39) { Program.SetSpeed(vk - 0x30 + 1); return true; } // top-row 0-9
@@ -598,18 +712,18 @@ namespace MatrixRain
         {
             if (liveSettings == null) return;
             value = Settings.Clamp(value, 1, 10);
-            if (liveSettings.Speed == value) return;
-            liveSettings.Speed = value;
-            ApplyLive();
+            if (liveSettings.Speed != value) { liveSettings.Speed = value; ApplyLive(); }
+            // Speed keys are 0-9, so show the key number.
+            foreach (RainForm f in liveForms) f.ShowIndicator("SPEED", (value - 1).ToString(), value);
         }
 
         public static void ChangeDensity(int delta)
         {
             if (liveSettings == null) return;
             int value = Settings.Clamp(liveSettings.Density + delta, 1, 10);
-            if (liveSettings.Density == value) return;
-            liveSettings.Density = value;
-            ApplyLive();
+            if (liveSettings.Density != value) { liveSettings.Density = value; ApplyLive(); }
+            string shown = (value / 10.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+            foreach (RainForm f in liveForms) f.ShowIndicator("DENSITY", shown, value);
         }
 
         static void ApplyLive()
@@ -656,6 +770,7 @@ namespace MatrixRain
                 case "s": return RunFullScreen(settings);
                 case "p": return RunPreview(settings, value);
                 case "snapshot": return RunSnapshot(settings, args);
+                case "hotkey": return RunHotkeyListener();
                 default:
                     using (SettingsForm f = new SettingsForm(settings)) f.ShowDialog();
                     return 0;
@@ -678,7 +793,7 @@ namespace MatrixRain
                 liveSettings = settings;
 
                 foreach (RainForm f in forms) f.Show();
-                if (forms.Count > 0) forms[0].Activate();
+                if (forms.Count > 0) { forms[0].Activate(); Native.SetForegroundWindow(forms[0].Handle); }
                 Cursor.Hide();
                 Application.AddMessageFilter(new InputWatcher());
 
@@ -692,6 +807,48 @@ namespace MatrixRain
                 foreach (RainForm f in forms) f.Dispose();
                 if (liveChanged) { try { settings.Save(); } catch { } } // remember keyboard changes for next time
                 Cursor.Show();
+            }
+            return 0;
+        }
+
+        // Background listener started at sign-in ("MatrixRain.exe /hotkey"): Ctrl+M starts the rain.
+        class HotkeyWindow : NativeWindow
+        {
+            public HotkeyWindow() { CreateHandle(new CreateParams()); }
+            protected override void WndProc(ref Message m)
+            {
+                if (m.Msg == 0x0312) // WM_HOTKEY
+                {
+                    try
+                    {
+                        Native.AllowSetForegroundWindow(-1); // let the new process take the foreground
+                        ProcessStartInfo psi = new ProcessStartInfo(Application.ExecutablePath, "/s");
+                        psi.UseShellExecute = false;
+                        Process.Start(psi);
+                    }
+                    catch { }
+                    return;
+                }
+                base.WndProc(ref m);
+            }
+        }
+
+        static int RunHotkeyListener()
+        {
+            bool created;
+            using (Mutex m = new Mutex(true, "MatrixRainScreensaver_Hotkey", out created))
+            {
+                if (!created) return 0; // already running
+                HotkeyWindow w = new HotkeyWindow();
+                const uint MOD_CONTROL = 0x2, MOD_NOREPEAT = 0x4000;
+                if (!Native.RegisterHotKey(w.Handle, 1, MOD_CONTROL | MOD_NOREPEAT, 0x4D)) // 'M'
+                {
+                    w.DestroyHandle();
+                    return 2; // Ctrl+M is in use by another program
+                }
+                Application.Run();
+                Native.UnregisterHotKey(w.Handle, 1);
+                w.DestroyHandle();
             }
             return 0;
         }

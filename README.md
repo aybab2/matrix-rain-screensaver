@@ -1,4 +1,4 @@
-﻿# Matrix Rain Screensaver
+# Matrix Rain Screensaver
 
 A lightweight Windows screensaver that shows green falling "digital rain" (katakana, digits and symbols) on **every monitor at once**. It works with any monitor layout, including ultrawides, portrait screens and negative desktop coordinates.
 
@@ -14,11 +14,15 @@ A lightweight Windows screensaver that shows green falling "digital rain" (katak
 | Key | Effect |
 | --- | --- |
 | `0`-`9` (top row or numpad) | Set falling speed: `0` slowest, `9` fastest |
-| `d` | Less rain (lower density) |
-| `D` (Shift+d) | More rain (higher density) |
+| `d` | Less rain: density steps down from 1.0 to 0.1 (the share of columns that rain) |
+| `D` (Shift+d) | More rain: density steps up to 1.0 |
 | Any other key, a click, or moving the mouse | Exit |
 
-Changes made with the keys are remembered next time.
+An indicator box shows the new speed or density for a moment. Changes made with the keys are remembered next time.
+
+## Ctrl+M hotkey (optional)
+
+`hotkey-install.ps1` makes **Ctrl+M** start the rain at any time. It runs a tiny listener (`MatrixRain.exe /hotkey`) now and at every sign-in, with no admin rights needed. `hotkey-uninstall.ps1` removes it. While it's installed, apps no longer receive Ctrl+M.
 
 ## Build
 
@@ -28,7 +32,7 @@ No downloads are needed. It builds with the C# compiler that ships with Windows 
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-This produces `MatrixRain.scr`.
+This produces `MatrixRain.scr` (the screensaver) and `MatrixRain.exe` (the same program, used by the hotkey).
 
 ## Install
 
