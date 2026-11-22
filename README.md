@@ -7,18 +7,20 @@ A lightweight Windows screensaver that shows green falling "digital rain" (katak
 - One full-screen window per monitor, sized correctly at any DPI scaling
 - Low CPU use: only changed cells are redrawn, using GDI blits from a pre-rendered glyph atlas (about 3 ms per frame at 3440x1440)
 - Standard screensaver modes: `/s` full screen, `/p` the small preview in Screen Saver Settings, `/c` the settings dialog
-- Settings: falling speed, amount of rain, character size, colour (green, cyan, blue, purple, red, amber, white)
+- Settings: falling speed, amount of rain, font size, colour (green, cyan, blue, purple, red, amber, white)
 
 ## Keyboard controls while it's running
 
 | Key | Effect |
 | --- | --- |
-| `0`-`9` (top row or numpad) | Set falling speed: `0` slowest, `9` fastest |
+| `0`-`9` (top row or numpad) | Set falling speed: `0` slowest, `9` fastest (each step is about 1.33x faster) |
 | `d` | Less rain: density steps down from 1.0 to 0.1 (the share of columns that rain) |
 | `D` (Shift+d) | More rain: density steps up to 1.0 |
+| `f` | Smaller characters: font size steps down to 0.1 |
+| `F` (Shift+f) | Bigger characters: font size steps up to 1.0 |
 | Any other key, a click, or moving the mouse | Exit |
 
-An indicator box shows the new speed or density for a moment. Changes made with the keys are remembered next time.
+An indicator box shows the new speed, density or font size for a moment. Changes made with the keys are remembered next time.
 
 ## Ctrl+M hotkey (optional)
 

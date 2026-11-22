@@ -142,7 +142,11 @@ namespace MatrixRain
         float speedFactor;
         int maxDelay;
 
-        static float SpeedFactorFor(int speedSetting) { return 0.35f + speedSetting * 0.16f; } // 0.51 .. 1.95
+        // Speed keys 0-9 (settings 1-10): equal ~1.33x steps from 0.15 up to 1.95 (key 9 unchanged).
+        static float SpeedFactorFor(int speedSetting)
+        {
+            return 1.95f * (float)Math.Pow(13.0, (Settings.Clamp(speedSetting, 1, 10) - 10) / 9.0);
+        }
         // Density 1..10 = 0.1..1.0 = share of columns that rain (and shorter gaps between drops).
         static float DensityFor(int densitySetting) { return Settings.Clamp(densitySetting, 1, 10) / 10f; }
         static int MaxDelayFor(int densitySetting) { return 6 + (int)((1f - DensityFor(densitySetting)) * 90); } // frames
@@ -195,11 +199,18 @@ namespace MatrixRain
         }
 
         public RainRenderer(int width, int height, int cellHeight, Settings s, int seed)
+            : this(width, height, cellHeight, s, seed, false) { }
+
+        // prefill = start with drops already part-way down the screen (used when the font size
+        // changes while running, so the screen doesn't go blank).
+        public RainRenderer(int width, int height, int cellHeight, Settings s, int seed, bool prefill)
         {
             Width = Math.Max(1, width);
             Height = Math.Max(1, height);
             ch = Math.Max(5, cellHeight);
-            cw = Math.Max(4, (int)Math.Round(ch * 0.68));
+            // Column pitch ~ one character height: glyphs are about half that wide, so there's
+            // always a clear gap between neighbouring columns, even at density 1.0.
+            cw = Math.Max(4, (int)Math.Round(ch * 0.95));
             cols = (Width + cw - 1) / cw;
             rows = (Height + ch - 1) / ch;
             nGlyphs = Glyphs.Length;
@@ -227,6 +238,13 @@ namespace MatrixRain
                 head[c] = -rnd.Next(rows + 1);
                 drawnHead[c] = (int)Math.Floor(head[c]);
                 delay[c] = rnd.Next(maxDelay);
+                if (prefill && rank[c] < density)
+                {
+                    // The first Step() then draws this column's whole trail at once.
+                    head[c] = rnd.Next(rows + trail[c]);
+                    drawnHead[c] = (int)head[c] - trail[c] - 1;
+                    delay[c] = 0;
+                }
             }
 
             IntPtr screen = Native.GetDC(IntPtr.Zero);
@@ -279,26 +297,44 @@ namespace MatrixRain
                 TextFormatFlags flags = TextFormatFlags.NoPadding | TextFormatFlags.HorizontalCenter |
                                         TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
                                         TextFormatFlags.NoPrefix | TextFormatFlags.NoClipping;
-                for (int lvl = 0; lvl < Levels; lvl++)
+
+                // Draw every glyph once in white, then tint copies of that row for each brightness
+                // level. Much faster than drawing text Levels times (matters for live font-size changes).
+                using (Bitmap row = new Bitmap(nGlyphs * cw, ch, PixelFormat.Format24bppRgb))
                 {
-                    Color col;
-                    if (lvl == 0) col = headColor;
-                    else
+                    using (Graphics rg = Graphics.FromImage(row))
                     {
-                        double t = (lvl - 1) / (double)(Levels - 1);     // 0 (bright) .. ~1 (dark)
-                        double b = Math.Pow(1.0 - t, 1.15) * 0.92 + 0.08;
-                        if (lvl == 1) b = 1.0;
-                        col = Color.FromArgb((int)(baseColor.R * b), (int)(baseColor.G * b), (int)(baseColor.B * b));
+                        rg.Clear(Color.Black);
+                        for (int i = 0; i < nGlyphs; i++)
+                            TextRenderer.DrawText(rg, Glyphs[i].ToString(), font, new Rectangle(i * cw, 0, cw, ch), Color.White, Color.Black, flags);
                     }
-                    for (int i = 0; i < nGlyphs; i++)
+                    for (int lvl = 0; lvl < Levels; lvl++)
                     {
-                        Rectangle r = new Rectangle(i * cw, lvl * ch, cw, ch);
-                        TextRenderer.DrawText(g, Glyphs[i].ToString(), font, r, col, Color.Black, flags);
+                        Color col = LevelColor(lvl, baseColor, headColor);
+                        ColorMatrix cm = new ColorMatrix(new float[][] {
+                            new float[] { col.R / 255f, 0, 0, 0, 0 },
+                            new float[] { 0, col.G / 255f, 0, 0, 0 },
+                            new float[] { 0, 0, col.B / 255f, 0, 0 },
+                            new float[] { 0, 0, 0, 1, 0 },
+                            new float[] { 0, 0, 0, 0, 1 } });
+                        using (ImageAttributes ia = new ImageAttributes())
+                        {
+                            ia.SetColorMatrix(cm);
+                            g.DrawImage(row, new Rectangle(0, lvl * ch, row.Width, ch), 0, 0, row.Width, ch, GraphicsUnit.Pixel, ia);
+                        }
                     }
                 }
                 atlasBmp = bmp.GetHbitmap(Color.Black);
             }
             oldAtlas = Native.SelectObject(atlasDC, atlasBmp);
+        }
+
+        static Color LevelColor(int lvl, Color baseColor, Color headColor)
+        {
+            if (lvl == 0) return headColor;
+            double t = (lvl - 1) / (double)(Levels - 1);     // 0 (bright) .. ~1 (dark)
+            double b = lvl == 1 ? 1.0 : Math.Pow(1.0 - t, 1.15) * 0.92 + 0.08;
+            return Color.FromArgb((int)(baseColor.R * b), (int)(baseColor.G * b), (int)(baseColor.B * b));
         }
 
         int[] dirtyTop, dirtyBottom; // per column rows touched since last blit (-1 = clean)
@@ -463,7 +499,7 @@ namespace MatrixRain
             uint dpi = 96;
             try { dpi = Native.GetDpiForWindow(Handle); } catch { }
             if (dpi == 0) dpi = 96;
-            double px = 10 + settings.Size * 2.4; // size 5 -> 22 px at 100% scaling
+            double px = 8 + settings.Size * 3; // font size 0.1..1.0 -> 11..38 px at 100% scaling (0.5 -> 23 px)
             return (int)Math.Round(px * dpi / 96.0);
         }
 
@@ -554,6 +590,21 @@ namespace MatrixRain
             ovUntil = unchecked(Environment.TickCount + 1500);
         }
 
+        // Font size changed while running: rebuild the grid at the new size, already mid-rain.
+        public void RebuildForNewSize()
+        {
+            if (!IsHandleCreated || IsDisposed) return;
+            if (renderer != null) renderer.Dispose();
+            Size sz = ClientSize;
+            renderer = new RainRenderer(sz.Width, sz.Height, CellHeight(), settings, Environment.TickCount ^ seed, true);
+            renderer.Step();
+            IntPtr dc = Native.GetDC(Handle);
+            renderer.BlitTo(dc);
+            if (ovDC != IntPtr.Zero)
+                Native.BitBlt(dc, ovRect.X, ovRect.Y, ovRect.Width, ovRect.Height, ovDC, 0, 0, Native.SRCCOPY);
+            Native.ReleaseDC(Handle, dc);
+        }
+
         public void ApplyLiveSettings()
         {
             if (renderer == null) return;
@@ -581,7 +632,7 @@ namespace MatrixRain
 
     // Closes the screensaver on any real user input, from whichever monitor window gets it.
     // Exceptions (live controls): 0-9 set the speed (0 = slowest, 9 = fastest),
-    // d = less rain, D (Shift+d) = more rain. Shift / Caps Lock on their own are ignored.
+    // d = less rain, D (Shift+d) = more rain, f / F = smaller / bigger text.
     class InputWatcher : IMessageFilter
     {
         readonly Point start;
@@ -625,6 +676,12 @@ namespace MatrixRain
                 Program.ChangeDensity(upper ? +1 : -1);
                 return true;
             }
+            if (vk == 0x46)                                                                   // F
+            {
+                bool upper = ((mods & Keys.Shift) != 0) ^ Control.IsKeyLocked(Keys.CapsLock);
+                Program.ChangeFontSize(upper ? +1 : -1);
+                return true;
+            }
             return false;
         }
     }
@@ -651,7 +708,7 @@ namespace MatrixRain
             int y = 14;
             speed = AddSlider("Falling speed", s.Speed, ref y);
             density = AddSlider("Amount of rain", s.Density, ref y);
-            size = AddSlider("Character size", s.Size, ref y);
+            size = AddSlider("Font size", s.Size, ref y);
 
             Label cl = new Label { Text = "Colour", Location = new Point(16, y + 4), AutoSize = true };
             color = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(140, y), Width = 220 };
@@ -662,7 +719,7 @@ namespace MatrixRain
 
             Label info = new Label
             {
-                Text = "While running: 0-9 = speed (0 slowest), d = less rain, D = more rain.\r\nAny other key or moving the mouse exits.",
+                Text = "While running: 0-9 = speed, d / D = less / more rain,\r\nf / F = smaller / bigger text. Other keys or the mouse exit.",
                 Location = new Point(16, y), Size = new Size(350, 36)
             };
             Controls.Add(info);
@@ -700,6 +757,7 @@ namespace MatrixRain
         static List<RainForm> liveForms = new List<RainForm>();
         static Settings liveSettings;
         static bool liveChanged;
+        static bool sizePending;
 
         public static void Quit()
         {
@@ -724,6 +782,20 @@ namespace MatrixRain
             if (liveSettings.Density != value) { liveSettings.Density = value; ApplyLive(); }
             string shown = (value / 10.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
             foreach (RainForm f in liveForms) f.ShowIndicator("DENSITY", shown, value);
+        }
+
+        public static void ChangeFontSize(int delta)
+        {
+            if (liveSettings == null) return;
+            int value = Settings.Clamp(liveSettings.Size + delta, 1, 10);
+            if (liveSettings.Size != value)
+            {
+                liveSettings.Size = value;
+                liveChanged = true;
+                sizePending = true; // rebuilt once on the next frame, however many presses arrive
+            }
+            string shown = (value / 10.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+            foreach (RainForm f in liveForms) f.ShowIndicator("FONT SIZE", shown, value);
         }
 
         static void ApplyLive()
@@ -798,7 +870,11 @@ namespace MatrixRain
                 Application.AddMessageFilter(new InputWatcher());
 
                 System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 33 }; // ~30 fps
-                timer.Tick += delegate { foreach (RainForm f in forms) f.Tick(); };
+                timer.Tick += delegate
+                {
+                    if (sizePending) { sizePending = false; foreach (RainForm f in forms) f.RebuildForNewSize(); }
+                    foreach (RainForm f in forms) f.Tick();
+                };
                 timer.Start();
 
                 Application.Run();
@@ -892,7 +968,7 @@ namespace MatrixRain
             int w = args.Length > 2 ? int.Parse(args[2]) : 3440;
             int h = args.Length > 3 ? int.Parse(args[3]) : 1440;
             int frames = args.Length > 4 ? int.Parse(args[4]) : 300;
-            int cell = (int)Math.Round(10 + settings.Size * 2.4);
+            int cell = 8 + settings.Size * 3;
             using (RainRenderer r = new RainRenderer(w, h, cell, settings, 12345))
             {
                 IntPtr screen = Native.GetDC(IntPtr.Zero);
