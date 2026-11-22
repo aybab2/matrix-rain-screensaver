@@ -1,4 +1,4 @@
-MATRIX RAIN SCREENSAVER
+﻿MATRIX RAIN SCREENSAVER
 =======================
 Green falling "digital rain" on every monitor at once (one window per screen, any layout).
 
@@ -20,5 +20,12 @@ Change its look
   In the same window click "Settings..." - falling speed, amount of rain, character size, colour.
   "Preview" shows it full screen; move the mouse to stop it.
 
+Keys while it is running
+  0-9   speed (0 slowest, 9 fastest)
+  d     less rain
+  D     more rain (Shift + d)
+  Changes made with the keys are remembered next time.
+
 Stopping it
-  Move the mouse, click, or press any key.
+  Move the mouse, click, or press any other key.
+

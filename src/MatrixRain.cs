@@ -133,8 +133,27 @@ namespace MatrixRain
         readonly int[] trail;     // trail length (rows)
         readonly int[] delay;     // frames to wait before the next drop starts
         readonly Random rnd;
-        readonly float speedFactor;
-        readonly int maxDelay;
+        float speedFactor;
+        int maxDelay;
+
+        static float SpeedFactorFor(int speedSetting) { return 0.35f + speedSetting * 0.16f; } // 0.51 .. 1.95
+        static int MaxDelayFor(int densitySetting) { return 8 + (10 - densitySetting) * 14; }   // frames
+
+        // Live changes while running (keyboard): rescale drops already falling so the change is instant.
+        public void SetSpeed(int speedSetting)
+        {
+            float nf = SpeedFactorFor(speedSetting);
+            float k = nf / speedFactor;
+            for (int c = 0; c < cols; c++) speed[c] *= k;
+            speedFactor = nf;
+        }
+
+        public void SetDensity(int densitySetting)
+        {
+            maxDelay = MaxDelayFor(densitySetting);
+            for (int c = 0; c < cols; c++)
+                if (delay[c] > maxDelay) delay[c] = rnd.Next(maxDelay + 1);
+        }
 
         IntPtr backDC, backBmp, oldBack, atlasDC, atlasBmp, oldAtlas;
 
@@ -157,8 +176,8 @@ namespace MatrixRain
             rows = (Height + ch - 1) / ch;
             nGlyphs = Glyphs.Length;
             rnd = new Random(seed);
-            speedFactor = 0.35f + s.Speed * 0.16f;          // 0.51 .. 1.95
-            maxDelay = 8 + (10 - s.Density) * 14;              // frames
+            speedFactor = SpeedFactorFor(s.Speed);
+            maxDelay = MaxDelayFor(s.Density);
 
             grid = new int[cols * rows];
             for (int i = 0; i < grid.Length; i++) grid[i] = rnd.Next(nGlyphs);
@@ -428,6 +447,13 @@ namespace MatrixRain
             Native.ReleaseDC(Handle, dc);
         }
 
+        public void ApplyLiveSettings()
+        {
+            if (renderer == null) return;
+            renderer.SetSpeed(settings.Speed);
+            renderer.SetDensity(settings.Density);
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             if (renderer == null) { e.Graphics.Clear(Color.Black); return; }
@@ -444,6 +470,8 @@ namespace MatrixRain
     }
 
     // Closes the screensaver on any real user input, from whichever monitor window gets it.
+    // Exceptions (live controls): 0-9 set the speed (0 = slowest, 9 = fastest),
+    // d = less rain, D (Shift+d) = more rain. Shift / Caps Lock on their own are ignored.
     class InputWatcher : IMessageFilter
     {
         readonly Point start;
@@ -457,11 +485,31 @@ namespace MatrixRain
                     Point p = Cursor.Position;
                     if (Math.Abs(p.X - start.X) > 10 || Math.Abs(p.Y - start.Y) > 10) Program.Quit();
                     break;
-                case 0x0100: case 0x0104:                 // key down / sys key down
+                case 0x0100:                              // WM_KEYDOWN
+                    if (HandleControlKey((int)(m.WParam.ToInt64() & 0xFF))) return true;
+                    Program.Quit();
+                    return true;
+                case 0x0104:                              // WM_SYSKEYDOWN (Alt combos)
                 case 0x0201: case 0x0204: case 0x0207:    // L/R/M button down
                 case 0x020B: case 0x020A: case 0x020E:    // X button, wheel, h-wheel
                     Program.Quit();
                     return true;
+            }
+            return false;
+        }
+
+        static bool HandleControlKey(int vk)
+        {
+            Keys mods = Control.ModifierKeys;
+            if ((mods & (Keys.Control | Keys.Alt)) != 0) return false;
+            if (vk == 0x10 || vk == 0x14 || vk == 0xA0 || vk == 0xA1) return true; // Shift, Caps Lock
+            if (vk >= 0x30 && vk <= 0x39) { Program.SetSpeed(vk - 0x30 + 1); return true; } // top-row 0-9
+            if (vk >= 0x60 && vk <= 0x69) { Program.SetSpeed(vk - 0x60 + 1); return true; } // numpad 0-9
+            if (vk == 0x44)                                                                   // D
+            {
+                bool upper = ((mods & Keys.Shift) != 0) ^ Control.IsKeyLocked(Keys.CapsLock);
+                Program.ChangeDensity(upper ? +1 : -1);
+                return true;
             }
             return false;
         }
@@ -500,8 +548,8 @@ namespace MatrixRain
 
             Label info = new Label
             {
-                Text = "Runs on every monitor. Move the mouse or press a key to exit.",
-                Location = new Point(16, y), Size = new Size(350, 20)
+                Text = "While running: 0-9 = speed (0 slowest), d = less rain, D = more rain.\r\nAny other key or moving the mouse exits.",
+                Location = new Point(16, y), Size = new Size(350, 36)
             };
             Controls.Add(info);
 
@@ -535,12 +583,39 @@ namespace MatrixRain
     static class Program
     {
         static bool quitting;
+        static List<RainForm> liveForms = new List<RainForm>();
+        static Settings liveSettings;
+        static bool liveChanged;
 
         public static void Quit()
         {
             if (quitting) return;
             quitting = true;
             Application.Exit();
+        }
+
+        public static void SetSpeed(int value)
+        {
+            if (liveSettings == null) return;
+            value = Settings.Clamp(value, 1, 10);
+            if (liveSettings.Speed == value) return;
+            liveSettings.Speed = value;
+            ApplyLive();
+        }
+
+        public static void ChangeDensity(int delta)
+        {
+            if (liveSettings == null) return;
+            int value = Settings.Clamp(liveSettings.Density + delta, 1, 10);
+            if (liveSettings.Density == value) return;
+            liveSettings.Density = value;
+            ApplyLive();
+        }
+
+        static void ApplyLive()
+        {
+            liveChanged = true;
+            foreach (RainForm f in liveForms) f.ApplyLiveSettings();
         }
 
         static void ParseArgs(string[] args, out string mode, out string value, out int nextIndex)
@@ -599,6 +674,9 @@ namespace MatrixRain
                 foreach (Screen sc in Screen.AllScreens)
                     forms.Add(new RainForm(sc.Bounds, settings, seed++, false));
 
+                liveForms = forms;
+                liveSettings = settings;
+
                 foreach (RainForm f in forms) f.Show();
                 if (forms.Count > 0) forms[0].Activate();
                 Cursor.Hide();
@@ -612,6 +690,7 @@ namespace MatrixRain
 
                 timer.Stop();
                 foreach (RainForm f in forms) f.Dispose();
+                if (liveChanged) { try { settings.Save(); } catch { } } // remember keyboard changes for next time
                 Cursor.Show();
             }
             return 0;

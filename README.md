@@ -9,6 +9,17 @@ A lightweight Windows screensaver that shows green falling "digital rain" (katak
 - Standard screensaver modes: `/s` full screen, `/p` the small preview in Screen Saver Settings, `/c` the settings dialog
 - Settings: falling speed, amount of rain, character size, colour (green, cyan, blue, purple, red, amber, white)
 
+## Keyboard controls while it's running
+
+| Key | Effect |
+| --- | --- |
+| `0`-`9` (top row or numpad) | Set falling speed: `0` slowest, `9` fastest |
+| `d` | Less rain (lower density) |
+| `D` (Shift+d) | More rain (higher density) |
+| Any other key, a click, or moving the mouse | Exit |
+
+Changes made with the keys are remembered next time.
+
 ## Build
 
 No downloads are needed. It builds with the C# compiler that ships with Windows (.NET Framework 4.x):
@@ -21,7 +32,7 @@ This produces `MatrixRain.scr`.
 
 ## Install
 
-Right-click `MatrixRain.scr` and choose **Install**, or run:
+Download `MatrixRain.scr` from the [latest release](https://github.com/aybab2/matrix-rain-screensaver/releases/latest) (or build it), then right-click it and choose **Install**, or run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File install.ps1 -TimeoutMinutes 10
@@ -32,3 +43,4 @@ This sets the screensaver for the current user only, with no admin rights needed
 ## Change the timeout or switch it off
 
 Press the Windows key, type **screen saver**, and open **Change screen saver**. Change the **Wait** box, or choose **(None)** to switch it off.
+
