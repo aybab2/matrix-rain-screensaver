@@ -29,6 +29,10 @@ namespace MatrixRain
     {
         [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+        [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint action, uint uParam, ref int pvParam, uint winIni);
+        [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint action, uint uParam, IntPtr pvParam, uint winIni);
+        [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
         [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
@@ -909,6 +913,50 @@ namespace MatrixRain
             }
         }
 
+        // Compares the saved screen saver settings with the live ones and re-applies the saved ones
+        // if something turned the screen saver off. Saved settings are never changed here.
+        static void RestoreScreenSaverIfOff()
+        {
+            try
+            {
+                int savedActive, savedTimeout;
+                string scr;
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop"))
+                {
+                    if (k == null) return;
+                    scr = k.GetValue("SCRNSAVE.EXE") as string;
+                    if (!int.TryParse(Convert.ToString(k.GetValue("ScreenSaveActive")), out savedActive)) return;
+                    if (!int.TryParse(Convert.ToString(k.GetValue("ScreenSaveTimeOut")), out savedTimeout)) return;
+                }
+                if (savedActive != 1 || savedTimeout <= 0 || string.IsNullOrEmpty(scr)) return; // user chose "off"
+
+                const uint SPI_GETSCREENSAVETIMEOUT = 14, SPI_SETSCREENSAVETIMEOUT = 15;
+                const uint SPI_GETSCREENSAVEACTIVE = 16, SPI_SETSCREENSAVEACTIVE = 17, SPIF_SENDCHANGE = 2;
+                int liveActive = 0, liveTimeout = 0;
+                Native.SystemParametersInfo(SPI_GETSCREENSAVEACTIVE, 0, ref liveActive, 0);
+                Native.SystemParametersInfo(SPI_GETSCREENSAVETIMEOUT, 0, ref liveTimeout, 0);
+                if (liveActive != 0 && liveTimeout == savedTimeout) return;
+
+                Native.SystemParametersInfo(SPI_SETSCREENSAVETIMEOUT, (uint)savedTimeout, IntPtr.Zero, SPIF_SENDCHANGE);
+                Native.SystemParametersInfo(SPI_SETSCREENSAVEACTIVE, 1, IntPtr.Zero, SPIF_SENDCHANGE);
+
+                // Note what was in front, to help find the app that keeps turning it off.
+                string fg = "?";
+                try
+                {
+                    uint pid;
+                    Native.GetWindowThreadProcessId(Native.GetForegroundWindow(), out pid);
+                    fg = Process.GetProcessById((int)pid).ProcessName;
+                }
+                catch { }
+                string log = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "screensaver-restore.log");
+                if (File.Exists(log) && new FileInfo(log).Length > 100000) File.Delete(log);
+                File.AppendAllText(log, string.Format("{0:yyyy-MM-dd HH:mm:ss}  restored (was active={1}, wait={2}s; now wait={3}s)  foreground app: {4}\r\n",
+                    DateTime.Now, liveActive, liveTimeout, savedTimeout, fg));
+            }
+            catch { }
+        }
+
         static int RunHotkeyListener()
         {
             bool created;
@@ -922,7 +970,15 @@ namespace MatrixRain
                     w.DestroyHandle();
                     return 2; // Ctrl+M is in use by another program
                 }
+                // Some apps (video calls, games) switch the screen saver off and never switch it back on.
+                // Once a minute, put Windows' live setting back to what is saved in Screen Saver Settings.
+                System.Windows.Forms.Timer guard = new System.Windows.Forms.Timer();
+                guard.Interval = 60000;
+                guard.Tick += delegate { RestoreScreenSaverIfOff(); };
+                guard.Start();
+                RestoreScreenSaverIfOff();
                 Application.Run();
+                guard.Stop();
                 Native.UnregisterHotKey(w.Handle, 1);
                 w.DestroyHandle();
             }

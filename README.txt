@@ -33,6 +33,10 @@ Keys while it is running
 Ctrl+M starts it any time
   Set up by hotkey-install.ps1 (starts with Windows). Remove with hotkey-uninstall.ps1.
   While it is on, other programs don't get Ctrl+M.
+  It also checks once a minute that the screen saver is still switched on. Some apps
+  (video calls, games) switch it off and never switch it back on; the listener puts back
+  what you chose in Screen Saver Settings and notes the app in screensaver-restore.log.
+  If you set the screen saver to (None), it leaves it off.
 
 Stopping it
   Move the mouse, click, or press any other key.
