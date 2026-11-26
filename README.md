@@ -26,6 +26,8 @@ An indicator box shows the new speed, density or font size for a moment. Changes
 
 `hotkey-install.ps1` makes **Ctrl+M** start the rain at any time. It runs a tiny listener (`MatrixRain.exe /hotkey`) now and at every sign-in, with no admin rights needed. `hotkey-uninstall.ps1` removes it. While it's installed, apps no longer receive Ctrl+M.
 
+The listener also checks once a minute that the screen saver is still switched on. Some apps (video calls, games) switch the screen saver off and never switch it back on. When that happens, the listener puts back the settings saved in Screen Saver Settings and notes the app that was in front in `screensaver-restore.log`. If you choose (None), it leaves the screen saver off.
+
 ## Build
 
 No downloads are needed. It builds with the C# compiler that ships with Windows (.NET Framework 4.x):
